@@ -1,163 +1,120 @@
-/**
- * Welcome to Cloudflare Workers! This is your first worker.
- *
- * - Run "npm run dev" in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your worker in action
- * - Run "npm run deploy" to publish your worker
- *
- * Learn more at https://developers.cloudflare.com/workers/
- */
+import telebot
+import os
+import time
+import json
+import logging
+from collections import deque
 
-const TOKEN = "BOT_TOKEN" // Get it from @BotFather https://core.telegram.org/bots#6-botfather
-const WEBHOOK = '/endpoint'
-const SECRET = "test" 
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
+# Token and destination channel
+TOKEN = "7983702636:AAGw-LB7V6in3NxfsDNmopUFozoBFaHT9do"  # Your new bot token
+DEST_CHANNEL = '@NobleFlix'
 
+if not TOKEN:
+    raise ValueError("Bot Token is not set. Please set it before running the bot.")
 
-/**
- * Wait for requests to the worker
- */
-addEventListener('fetch', event => {
-  const url = new URL(event.request.url)
-  if (url.pathname === WEBHOOK) {
-    event.respondWith(handleWebhook(event))
-  } else if (url.pathname === '/registerWebhook') {
-    event.respondWith(registerWebhook(event, url, WEBHOOK, SECRET))
-  } else if (url.pathname === '/unRegisterWebhook') {
-    event.respondWith(unRegisterWebhook(event))
-  } else {
-    event.respondWith(new Response('No handler for this request'))
-  }
-})
+if not DEST_CHANNEL.startswith('@'):
+    raise ValueError("DEST_CHANNEL must start with '@'. Please provide a valid channel username.")
 
+bot = telebot.TeleBot(TOKEN)
 
+# File to store queue data
+QUEUE_FILE = "file_queue.json"
 
+# Load the queue from file
+def load_queue():
+    if os.path.exists(QUEUE_FILE):
+        with open(QUEUE_FILE, "r") as file:
+            data = json.load(file)
+            return deque(data)  # Convert list to deque for FIFO operations
+    return deque()
 
-/**
- * Handle requests to WEBHOOK
- * https://core.telegram.org/bots/api#update
- */
-async function handleWebhook (event) {
-  // Check secret
-  if (event.request.headers.get('X-Telegram-Bot-Api-Secret-Token') 
-  !== SECRET) {
-    return new Response('Unauthorized', { status: 403 })
-  }
+# Save the queue to file
+def save_queue(queue):
+    with open(QUEUE_FILE, "w") as file:
+        json.dump(list(queue), file, indent=4)
 
-  // Read request body synchronously
-  const update = await event.request.json()
-  // Deal with response asynchronously
-  event.waitUntil(onUpdate(update))
+# Initialize queue
+file_queue = load_queue()
 
-  return new Response('Ok')
-}
+# Format caption for files
+def format_caption(file_name):
+    formatted_caption = f"[@FilmyEmpire] {file_name}\n\n"
+    formatted_caption += ">> ✓ All members join backup channel\n"
+    formatted_caption += ">> 𝖩𝗈𝗂𝗇 ➥ @FilmyEmpire"
+    return formatted_caption
 
+# Process files from the queue
+def process_queue():
+    global file_queue
+    while file_queue:
+        file_data = file_queue[0]  # Peek at the first item in the queue
+        file_id = file_data["file_id"]
+        file_name = file_data["file_name"]
+        file_type = file_data["file_type"]
+        caption = file_data["caption"]
 
+        try:
+            # Send the file based on its type
+            if file_type == "document":
+                bot.send_document(DEST_CHANNEL, file_id, caption=caption)
+            elif file_type == "video":
+                bot.send_video(DEST_CHANNEL, file_id, caption=caption)
 
-/**
- * Handle incoming Update
- * https://core.telegram.org/bots/api#update
- */
-async function onUpdate (update) {
-  if ('message' in update) {
-    await onMessage(update.message)
-  }
+            logging.info(f"File sent: {file_name}")
+            file_queue.popleft()  # Remove the file from the queue after successful sending
+            save_queue(file_queue)  # Save the updated queue
 
-}
+        except Exception as e:
+            logging.error(f"Error sending file {file_name}: {e}")
+            time.sleep(5)  # Wait before retrying
+            break  # Stop processing queue if there is an error to avoid rapid retries
 
+# Handle incoming media files
+@bot.message_handler(content_types=['document', 'video'])
+def handle_media(message):
+    file_id = None
+    file_name = None
+    file_type = None
 
+    if message.document:
+        file_id = message.document.file_id
+        file_name = message.document.file_name
+        file_type = "document"
+    elif message.video:
+        file_id = message.video.file_id
+        file_name = message.video.file_name
+        file_type = "video"
 
-/**
- * Handle incoming Message
- * https://core.telegram.org/bots/api#message
- */
-async function onMessage (message) {
+    if not file_id or not file_name:
+        logging.warning("File information missing!")
+        return
 
-    
-    return sendPlainTextWithReply(message.chat.id,
-     'Echo:\n' +message.text ,message.message_id)
-  
-}
+    caption = format_caption(file_name)
 
+    # Add file to queue
+    file_queue.append({"file_id": file_id, "file_name": file_name, "file_type": file_type, "caption": caption})
+    save_queue(file_queue)  # Save the queue to file
+    logging.info(f"File added to queue: {file_name}")
 
+    # Start processing the queue
+    process_queue()
 
-/**
- * Send plain text message
- * https://core.telegram.org/bots/api#sendmessage
- */
-async function sendPlainTextWithReply (chatId, 
-text,reply_to_message_id) {
- 
-    return (await fetch(apiUrl('sendMessage', {
-      chat_id: chatId,
-      reply_to_message_id:reply_to_message_id,
-      text
-    }))).json()
- }
- 
- 
- 
- 
-async function sendPlainText (chatId, text) {
+# Start bot
+@bot.message_handler(commands=['start'])
+def start_bot(message):
+    bot.send_message(message.chat.id, "Welcome! Send a file, and I will process it in order.")
+    logging.info("Bot is running...")
 
-    return (await fetch(apiUrl('sendMessage', {
-      chat_id: chatId,
-      text
-    }))).json()
-  
-}
+    # Retry processing the queue on bot startup
+    process_queue()
 
-
-async function editPlainText (chatId, msg_id,text) {
-
-    return (await fetch(apiUrl('editMessageText', {
-      chat_id:chatId,
-      message_id:msg_id,
-      text
-    }))).json()
-  
-}
-
-
-
-/**
- * Set webhook to this worker's url
- * https://core.telegram.org/bots/api#setwebhook
- */
-async function registerWebhook (event, requestUrl, 
-suffix, secret) {
-  // https://core.telegram.org/bots/api#setwebhook
-  const webhookUrl = `${requestUrl.protocol}//${requestUrl.hostname}${suffix}`
-  const r = await (await fetch(apiUrl('setWebhook', 
-  { url: webhookUrl, secret_token: secret }))).json()
-  return new Response('ok' in r && r.ok 
-  ? 'Ok' : JSON.stringify(r, null, 2))
-}
-
-
-
-/**
- * Remove webhook
- * https://core.telegram.org/bots/api#setwebhook
- */
-async function unRegisterWebhook (event) {
-  const r = await (await fetch(apiUrl('setWebhook',
-   { url: '' }))).json()
-  return new Response('ok' in r && r.ok 
-  ? 'Ok' : JSON.stringify(r, null, 2))
-}
-
-
-
-/**
- * Return url to telegram api, optionally with parameters added
- */
-function apiUrl (methodName, params = null) {
-  let query = ''
-  if (params) {
-    query = '?' + new URLSearchParams(params).toString()
-  }
-  return `https://api.telegram.org/bot${TOKEN}/${methodName}${query}`
-}
-
-
+# Start polling
+while True:
+    try:
+        bot.polling(none_stop=True)
+    except Exception as e:
+        logging.error(f"Polling Error: {e}")
+        time.sleep(5)  
